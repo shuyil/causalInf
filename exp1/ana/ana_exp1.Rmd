@@ -1,0 +1,610 @@
+---
+title: "ana_exp1"
+output: html_document
+date: "2026-07-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rjson)
+library(reshape2)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(ggplot2)
+library(dplyr)
+library(Rmisc)
+library(rstatix)
+library(broom.mixed)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(patchwork)
+library(ggpubr)
+
+```
+
+
+
+```{r read in data}
+# Specify the file path
+file_path <- "ci_data.csv"
+
+# Read the CSV file
+data <- read.csv(file_path)
+
+data$update = abs(data$un_r2-data$un_r1)
+data$un_r2_abs = abs(data$un_r2)
+
+
+df <- reshape(data, direction = "long", varying = list(c("l_r1","l_r2"),c("un_r1","un_r2")),
+              timevar = "time", v.names = c('l','un'), idvar = c('subject','block','session','problem'))
+
+
+df$time = as.factor(df$time)
+df$block = as.factor(df$block)
+df$post_2cause = as.factor(df$post_2cause)
+df$session = as.factor(df$session)
+```
+
+
+```{r functions to run}
+plot_os_bb <- function(data, block = c(2,6),y_limits = c(-25, 100), y_breaks = seq(-25, 100, 25),title = 'Unovershadowing',star = "***",y_star) {
+
+  # Step 2-4: Extract and prepare plot data
+  fixed_effects_summary <- data %>%
+    unnest(fixed_results) %>%
+    filter(term == "(Intercept)") %>%
+    select(time, estimate, se = std.error)
+  
+  random_intercepts <- data %>%
+    select(time, fixed_intercept, random_results) %>%
+    unnest(random_results) %>%
+    mutate(subject_mean = fixed_intercept + `(Intercept)`) %>%
+    select(time, subject, subject_mean) %>%
+    mutate(time_jitter = as.numeric(time) + case_when(
+      time == "1" ~ runif(n(), 0.2, 0.3),
+      time == "2" ~ runif(n(), -0.3, -0.2)
+    ))
+
+  
+  
+(ggplot(fixed_effects_summary, aes(x = as.numeric(time), y = estimate, fill = as.factor(time), color = as.factor(time))) +
+
+  geom_bar(stat="identity", position=position_dodge(0.3), alpha = 0.6, size = 0.8, width = 0.7) +
+  geom_errorbar(aes(ymin = estimate - se, ymax = estimate + se), width = .2, size = 0.8, position = position_dodge(.9)) +
+  geom_line(data = random_intercepts, aes(x = time_jitter, y = subject_mean, group = subject), 
+            color = "gray70", alpha = 0.7, size = 0.5) +  
+  geom_point(data = random_intercepts,
+             aes(x = time_jitter, y = subject_mean, color = as.factor(time)),
+             shape = 21,  
+             fill = 'white',# Allows fill + outline control
+             size = 2,              # Slightly larger
+             stroke = 0.8,          # Outline thickness
+             alpha = 0.6)+
+  labs(title = title, x = "", y = "Causal rating") +
+  scale_x_continuous(breaks = c(1,2), labels = c("pre", "post"),
+                   limits = c(0.5, 2.5)) + # Keep categorical labels
+  theme_classic() +
+  geom_hline(yintercept = 0, color = "black", size = 0.5) +
+  theme(
+    text = element_text(size = 26),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black",linewidth = 0.6),
+    aspect.ratio = 1.1/1,
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 23, color = "black"),
+    plot.title = element_text(margin = margin(t = 10, b = 20), size = 23, hjust = 0.5),
+    axis.ticks = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+  guides(fill = "none", color = "none") +
+  scale_y_continuous(breaks = y_breaks, limits = y_limits, expand = c(0, 0)) +
+  scale_fill_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6")) +
+  scale_color_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6")) +
+  annotate("text",
+           x = 1.5,
+           y = y_star,  # Slightly above highest bar
+           label = star,
+           size = 8,  # Adjust size as needed
+           vjust = 0.5) )
+
+}
+```
+
+
+```{r backward blocking and unovershadowing}
+
+# Unovershadowing
+(mixed_model <- summary(lmer(data=df[df$session==1 & df$block %in%  c(2,6),], un ~ time + (time|subject))))
+p_value <- coef(summary(mixed_model))["time2", "Pr(>|t|)"]
+star <- ifelse(p_value < 0.001, "***",
+              ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*", "")))
+
+un_os<- df %>%
+  filter(session == "2" & block %in% c(2,6)) %>%
+  group_by(time) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)), # Fit model
+    fixed_results = map(linMod, ~ tidy(.)),  # Extract fixed effects
+    random_results = map(linMod, ~ as.data.frame(ranef(.)$subject) %>% rownames_to_column("subject")), # Extract random effects
+    fixed_intercept = map_dbl(linMod, ~ fixef(.)[["(Intercept)"]]) # Extract fixed intercept
+  )
+svg("figure/plot_os_session1.svg", 
+    width = 4.5, 
+    height = 4.5/1.2,
+    antialias = "none")
+plot_os_bb(un_os,block=c(2,6), y_limits = c(-100, 100.4), y_breaks = seq(-100,100,50), title = 'UO', star = star, y_star = 90)
+
+
+(mixed_model <- summary(lmer(data=df[df$session==1 & df$block %in%  c(1,3),], un ~ time + (time|subject))))
+summary(lmer(data=df[df$session==1 & df$block %in%  c(1,3) & df$time == 2,], un ~ 1 + (1|subject)))
+p_value <- coef(summary(mixed_model))["time2", "Pr(>|t|)"]
+star <- ifelse(p_value < 0.001, "***",
+              ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*", "")))
+
+un_bb <- df %>%
+  filter(session == "1" & block %in% c(1,3)) %>%
+  group_by(time) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)), # Fit model
+    fixed_results = map(linMod, ~ tidy(.)),  # Extract fixed effects
+    random_results = map(linMod, ~ as.data.frame(ranef(.)$subject) %>% rownames_to_column("subject")), # Extract random effects
+    fixed_intercept = map_dbl(linMod, ~ fixef(.)[["(Intercept)"]]) # Extract fixed intercept
+  )
+svg("figure/plot_bb_session1.svg", 
+    width = 4.5, 
+    height = 4.5/1.2,
+    antialias = "none")  # Prevents font smoothing changes
+plot_os_bb(un_bb, y_limits = c(-100, 100.4), y_breaks = seq(-100,100,50), title = 'BB',star=star,y_star = 75)
+dev.off()
+
+summary(lmer(data=df[df$session==2 & df$block %in%  c(1,3) & df$time == '2',], un ~ 1 + (1|subject)))
+```
+
+```{r control trials}
+# Specify the file path
+file_path <- "/Users/dariajensen/Desktop/LuoS/ana/ci_data_time.csv"
+
+# Read the CSV file
+data_rt <- read.csv(file_path)
+data_control <- data_rt[data_rt$struct == 0,]
+df_control <- reshape(data_control, direction = "long", varying = list(c("l_r1","l_r2"),c("un_r1","un_r2")),
+              timevar = "time", v.names = c('l','un'), idvar = c('subject','block','session','problem'))
+df_control$time = as.factor(df_control$time)
+(mixed_model <- summary(lmer(data=df_control[df_control$session==1,], un ~ time + (time|subject))))
+p_value <- coef(summary(mixed_model))["time2", "Pr(>|t|)"]
+star <- ifelse(p_value < 0.001, "***",
+              ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*", "ns")))
+
+un_control <- df_control %>%
+  filter(session == "1") %>%
+  group_by(time) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)), # Fit model
+    fixed_results = map(linMod, ~ tidy(.)),  # Extract fixed effects
+    random_results = map(linMod, ~ as.data.frame(ranef(.)$subject) %>% rownames_to_column("subject")), # Extract random effects
+    fixed_intercept = map_dbl(linMod, ~ fixef(.)[["(Intercept)"]]) # Extract fixed intercept
+  )
+svg("figure/plot_control_session1.svg", 
+    width = 4.5, 
+    height = 4.5/1.2,
+    antialias = "none")
+plot_os_bb(un_control, y_limits = c(-100, 100.4), y_breaks = seq(-100,100,50), title = 'Control',star=star,y_star = 20)
+dev.off()
+
+```
+
+```{R two-cause trials}
+un_pb_2cause <- df %>%
+  filter(session == '1' & block == '4', time == '1', problem %in% c(1,2,3,4)) %>%
+   summarySEwithin(data = ., measurevar = 'l', withinvars = c("problem"), idvar = 'subject')
+t.test(df$l[df$session=='1' & df$block == '4' & df$time == '1' & df$problem == 1], mu = 0, alternative = "two.sided")
+df %>%
+  filter(session == '1' & block == '4', time == '1',problem %in% c(1,2,3,4)) %>%
+  lmer(data = ., l ~ problem + (problem|subject)) %>%
+  summary()
+svg("figure/plot_2_cause_session1.svg", 
+    width = 3, 
+    height = 3/0.8,
+   antialias = "none")  # Prevents font smoothing changes
+(un_pb_2cause %>%
+    ggplot(aes(x = problem, y = l)) +
+    geom_bar(stat="identity", position=position_dodge(), color = "#2797AD", fill = '#2797AD', alpha = 0.5, size = 1, width = 0.8) +
+    geom_errorbar(aes(ymin=l-se, ymax=l+se), width=.2, size = .85, position=position_dodge(.9), color = "#2797AD") +
+    labs(y="Causal rating", x="Trials", title = "") +
+    theme_classic() + geom_hline(yintercept = 0, color = "black", size = 0.8) +
+    theme(text=element_text(size=25),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          axis.line=element_line(colour="black",size = 0.8),
+          aspect.ratio=1/1,
+          axis.text=element_text(size=20, color="black"), axis.title.x = element_text(size=20, color="black"),
+         axis.ticks = element_line(linewidth = 0.8),
+  axis.ticks.length = unit(4, "pt"),) +
+          guides(fill="none",color="none" ) +
+    scale_y_continuous(breaks = seq(-20, 20, 20),limits = c(-25, 20.14),expand = c(0,0)) )
+```
+
+```{R post_2cause - inferred update}
+
+summary(lmer(data=df[df$session==1 & df$block %in%  c(1,3,5,7),], un ~ time*post_2cause + (time*post_2cause|subject)))
+
+un_block35<- df %>%
+  filter(session == "1" & block %in% c(1,3,5,7)) %>%
+  group_by(time,post_2cause) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)), # Fit model
+    fixed_results = map(linMod, ~ tidy(.)),  # Extract fixed effects
+    random_results = map(linMod, ~ as.data.frame(ranef(.)$subject) %>% rownames_to_column("subject")), # Extract random effects
+    fixed_intercept = map_dbl(linMod, ~ fixef(.)[["(Intercept)"]]) # Extract fixed intercept
+  )
+
+
+plot_blocks <- function(data, x = 'post_2cause', blocks = c(1, 2), 
+                        y_limits = c(-25, 100), 
+                        y_breaks = seq(-25, 100, 25), 
+                        block_labels = c("Before", "After"),
+                        title = '') {
+  fixed_effects_summary <- data %>%
+    unnest(fixed_results) %>%
+    filter(term == "(Intercept)") %>%
+    filter(.data[[x]] %in% blocks) %>%
+    select(all_of(x), time, estimate, se = std.error) %>%
+    dplyr::rename(block_var = !!sym(x)) %>%
+    mutate(
+      block_var = factor(block_var, levels = blocks),
+      time = factor(time, levels = c("1", "2"))
+    )
+
+  dodge_width <- 0.5
+  
+  fixed_effects_summary <- fixed_effects_summary %>%
+    mutate(
+      x_position = as.numeric(block_var) + 
+        (as.numeric(time) - 1.5) * dodge_width
+    )
+  
+  random_intercepts <- data %>%
+    select(all_of(x), time, fixed_intercept, random_results) %>%
+    filter(.data[[x]] %in% blocks) %>%
+    unnest(random_results) %>%
+    mutate(subject_mean = fixed_intercept + `(Intercept)`) %>%
+    select(all_of(x), time, subject, subject_mean) %>%
+    dplyr::rename(block_var = !!sym(x)) %>%
+    mutate(
+      block_var = factor(block_var, levels = blocks),
+      time = factor(time, levels = c("1", "2")),
+      x_position = as.numeric(block_var) + 
+        (as.numeric(time) - 1.5) * dodge_width,
+      # Time 1 points go to the RIGHT of the bar; Time 2 points go to the LEFT
+      x_jitter = x_position + 
+        case_when(
+          time == "1" ~ runif(n(), 0.08, 0.13),
+          time == "2" ~ runif(n(), -0.13, -0.08)
+        )
+    )
+
+  ggplot(fixed_effects_summary, 
+         aes(x = x_position, y = estimate, 
+             fill = time, color = time)) +
+    geom_bar(stat = "identity", alpha = 0.6, linewidth = 0.8, width = 0.35) +
+    geom_errorbar(aes(ymin = estimate - se, ymax = estimate + se), 
+                  width = 0.1, linewidth = 0.6) +
+    geom_line(data = random_intercepts, 
+              aes(x = x_jitter, y = subject_mean, 
+                  group = interaction(subject, block_var)), 
+              color = "gray70", alpha = 0.7, linewidth = 0.5,
+              inherit.aes = FALSE) +
+    geom_point(data = random_intercepts,
+               aes(x = x_jitter, y = subject_mean, color = time),
+               shape = 21,
+               fill = 'white',
+               size = 2,
+               stroke = 0.8,
+               alpha = 0.6,
+               inherit.aes = FALSE) +
+    labs(title = title, x = "", y = "Causal rating") +
+    scale_x_continuous(
+      breaks = seq_along(blocks),
+      labels = block_labels,
+      limits = c(0.5, length(blocks) + 0.5)
+    ) +
+    scale_y_continuous(breaks = y_breaks, limits = y_limits, expand = c(0, 0)) +
+    scale_fill_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6"),
+                      labels = c("Pre", "Post")) +
+    scale_color_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6"),
+                       labels = c("Pre", "Post")) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+    theme_classic() +
+    theme(
+      text = element_text(size = 26),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(colour = "black", linewidth = 0.6),
+      aspect.ratio = 0.8/1,
+      axis.text.y = element_text(size = 20, color = "black"),
+      axis.text.x = element_text(size = 23, color = "black"),
+      plot.title = element_text(margin = margin(t = 10, b = 20), 
+                                 size = 23, hjust = 0.5),
+      axis.ticks = element_line(linewidth = 0.6),
+      axis.ticks.length = unit(4, "pt"),
+      legend.position = "top"
+    ) +
+    guides(fill = guide_legend(title = "Time"), 
+           color = guide_legend(title = "Time"))
+}
+
+# Usage:
+svg("figure/plot_bb_struct1357_session1_points.svg", 
+    width = 4.5/0.8, 
+    height = 4.5,
+    antialias = "none")
+
+plot_blocks(un_block35, x = 'post_2cause', blocks = c(1, 2), 
+            y_limits = c(-100, 100.8), 
+            y_breaks = seq(-100, 100, 50), 
+            block_labels = c("Before", "After"),
+            title = '')
+
+dev.off()
+  
+```
+
+```{R post_2cause - revaluation}
+data$block = as.factor(data$block)
+data$post_2cause = as.factor(data$post_2cause)
+(mixed_model <- summary(lmer(data=data[data$session == 1 & data$block %in% c(1,3,5,7),], update ~ post_2cause + (post_2cause|subject))))
+summary(lmer(data=df[df$session==1 & df$block %in%  c(3,5),], un ~ time*post_2cause + (time*post_2cause|subject)))
+# Step 1: Fit mixed models and extract fixed & random effects
+p_value <- coef(summary(mixed_model))["post_2cause2", "Pr(>|t|)"]
+
+# Determine star symbol
+star <- ifelse(p_value < 0.001, "***",
+              ifelse(p_value < 0.01, "**",
+                     ifelse(p_value < 0.05, "*", "")))
+update_bb <- data %>%
+  filter(session == "1" & post_2cause %in% c(1,2)) %>%
+  group_by(post_2cause) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(update ~ 1 + (1 | subject), data = .)), # Fit model
+    fixed_results = map(linMod, ~ tidy(.)),  # Extract fixed effects
+    random_results = map(linMod, ~ as.data.frame(ranef(.)$subject) %>% rownames_to_column("subject")), # Extract random effects
+    fixed_intercept = map_dbl(linMod, ~ fixef(.)[["(Intercept)"]]) # Extract fixed intercept
+  )
+
+  # Step 2-4: Extract and prepare plot data
+  fixed_effects_summary <- update_bb %>%
+    unnest(fixed_results) %>%
+    filter(term == "(Intercept)") %>%
+    select(post_2cause, estimate, se = std.error)
+  
+  random_intercepts <- update_bb %>%
+    select(post_2cause, fixed_intercept, random_results) %>%
+    unnest(random_results) %>%
+    mutate(subject_mean = fixed_intercept + `(Intercept)`) %>%
+    select(post_2cause, subject, subject_mean) %>%
+    mutate(time_jitter = as.numeric(post_2cause) + case_when(
+      post_2cause == "1" ~ runif(n(), 0.2, 0.3),
+      post_2cause == "2" ~ runif(n(), -0.3, -0.2)
+    ))
+
+svg("figure/plot_bb_struct1357_session1.svg", 
+    width = 4.7, 
+    height = 4.7/1.2,
+    antialias = "none")  # Prevents font smoothing changes
+
+ggplot(fixed_effects_summary, aes(x = as.numeric(post_2cause), y = estimate, fill = as.factor(post_2cause), color = as.factor(post_2cause))) +
+  geom_bar(stat="identity", position=position_dodge(0.3), alpha = 0.6, size = 0.8, width = 0.6) +
+  geom_errorbar(aes(ymin = estimate - se, ymax = estimate + se), width = .3, size = 0.5, position = position_dodge(.9)) +
+  geom_line(data = random_intercepts, aes(x = time_jitter, y = subject_mean, group = subject), 
+            color = "gray70", alpha = 0.7, size = 0.5) +  
+  geom_point(data = random_intercepts,
+             aes(x = time_jitter, y = subject_mean, color = as.factor(post_2cause)),
+             shape = 21,  
+             fill = 'white',# Allows fill + outline control
+             size = 2,              # Slightly larger
+             stroke = 0.8,          # Outline thickness
+             alpha = 0.6)+  
+  labs(title = '', x = "", y = "Rating update") +
+  scale_x_continuous(breaks = c(1,2), labels = c("Before", "After"),
+                   limits = c(0.5,2.5)) +  # Keep categorical labels
+  theme_classic() + 
+  geom_hline(yintercept = 0, color = "black", size = 0.5) +
+  theme(
+    text = element_text(size = 26),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(colour = "black", linewidth = 0.6),
+    aspect.ratio = 1.1/1,
+    axis.text.y = element_text(size = 20, color = "black"),
+    axis.text.x = element_text(size = 23, color = "black"),
+    plot.title = element_text(margin = margin(t = 10, b = 20), size = 23, hjust = 0.5),
+    axis.ticks = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt")
+  ) +
+  guides(fill = "none", color = "none") +
+  scale_y_continuous(breaks = seq(0,120,40), limits = c(0,120), expand = c(0, 0)) +
+  scale_fill_manual(values = c("1" = "#FCD200", "2" = "#00C9B8")) +
+  scale_color_manual(values = c("1" = "#FCD200", "2" = "#00C9B8")) +
+    annotate("text", 
+           x = 1.5,  # Midpoint between Before (3) and After (5)
+           y = max(random_intercepts$subject_mean) * 1.08,  # Slightly above highest bar
+           label = star, 
+           size = 8,  # Adjust size as needed
+           vjust = 0.5) 
+
+dev.off() 
+
+```
+
+## supplementary figures
+
+```{r block 1 & 3 / block 5 & 7}
+# comparing BB trials before and after UO trials (which reinforced the belief in a one-cause hypothesis)
+
+summary(lmer(data=df[df$session==1 & df$block %in%  c(1,3),], un ~ time*block + (time+block|subject)))
+
+df$post_uo <- NA
+df$post_uo[df$block %in% c(1, 5)] <- 0
+df$post_uo[df$block %in% c(3, 7)] <- 1
+summary(lmer(
+  data = df[df$session == 1 & df$block %in% c(1,3), ],
+  un ~ time * post_uo + (time| subject)
+))
+
+un_pb_struct <- df %>%
+  filter(session == "1" & block %in% c(1,3)) %>%
+  group_by(time,block) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)),
+    results = map(linMod, ~ tidy(.))
+  ) %>% 
+  unnest(results) %>% 
+  filter(term == "(Intercept)") %>% 
+  select(time,block, estimate = estimate, se = std.error)
+
+svg("figure/plot_bb_struct13.svg",
+    width = 4.5,
+    height = 4.5/0.9,
+   antialias = "none")  # Prevents font smoothing changes
+
+(un_pb_struct %>%
+    ggplot(aes(x = block, y = estimate, fill = time, color = time)) +
+    geom_bar(stat="identity", position=position_dodge(.75), alpha = 0.6, size = 0.8, width = 0.6) +
+    geom_errorbar(aes(ymin=estimate-se, ymax=estimate+se), width=.15, size = 0.8, position=position_dodge(.75)) +
+    labs(title = "",x="",y="Causal rating")  +
+    theme_classic() + geom_hline(yintercept = 0, color = "black", size = 0.8) +
+    theme(text=element_text(size=25),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          axis.line=element_line(colour="black"),
+          aspect.ratio=0.9/1,
+          axis.text.x=element_text(size=20, color="black"),
+          axis.text.y=element_text(size=23, color="black"),
+          plot.title = element_text(margin = margin(t=10,b=20),size=25),
+          legend.title=element_blank()) +
+          guides(color="none") +
+    scale_y_continuous(breaks = seq(-50, 50, 25),limits = c(-50, 50),expand = c(0,0)) +
+    scale_fill_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6"), labels = c("pre","post"))+
+    scale_color_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6")) +
+    scale_x_discrete(labels = c('Block 1','Block 3')))
+
+# dev.off()
+
+
+summary(lmer(data=df[df$session==1 & df$block %in%  c(5,7),], un ~ time*block + (time+block|subject)))
+un_pb_struct <- df %>%
+  filter(session == "1" & block %in% c(5,7)) %>%
+  group_by(time,block) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(un ~ 1 + (1 | subject), data = .)),
+    results = map(linMod, ~ tidy(.))
+  ) %>% 
+  unnest(results) %>% 
+  filter(term == "(Intercept)") %>% 
+  select(time,block, estimate = estimate, se = std.error)
+
+svg("figure/plot_bb_struct57.svg", 
+    width = 5, 
+    height = 5/0.9,
+   antialias = "none")  # Prevents font smoothing changes
+
+(un_pb_struct %>%
+    ggplot(aes(x = block, y = estimate, fill = time, color = time)) +
+    geom_bar(stat="identity", position=position_dodge(.75), alpha = 0.6, size = 0.8, width = 0.6) +
+    geom_errorbar(aes(ymin=estimate-se, ymax=estimate+se), width=.15, size = 0.8, position=position_dodge(.75)) +
+    labs(title = "",x="",y="Causal rating")  +
+    theme_classic() + geom_hline(yintercept = 0, color = "black", size = 0.8) +
+    theme(text=element_text(size=25),
+          panel.grid.major=element_blank(),
+          panel.grid.minor=element_blank(),
+          axis.line=element_line(colour="black"),
+          aspect.ratio=0.9/1,
+          axis.text.x=element_text(size=25, color="black"),
+          axis.text.y=element_text(size=23, color="black"),
+          plot.title = element_text(margin = margin(t=10,b=20),size=25),
+          legend.title=element_blank()) +
+          guides(color="none") +
+    scale_y_continuous(breaks = seq(-50, 50, 25),limits = c(-50, 50),expand = c(0,0)) +
+    scale_fill_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6"), labels = c("pre","post"))+
+    scale_color_manual(values = c("1" = "#2797AD", "2" = "#8D5AA6")) +
+    scale_x_discrete(labels = c('Block 5','Block 7')))
+
+dev.off()
+
+
+```
+
+```{r individual difference}
+
+# participants who initially held a stronger one-cause structure belief showed greater update in inferred update after two-cause trials
+data_con <- data %>%
+  filter(session == "1" & block %in% c(1) ) %>%
+  aggregate(un_r2~subject, FUN = 'mean', data = .) %>%
+  mutate(con = ifelse(un_r2 < -20, "1","2"))
+
+dataS <- data %>% left_join(data_con, by = "subject")
+dataS$block <- as.factor(dataS$block)
+dataS$post_2cause <- as.factor(dataS$post_2cause)
+dataS$con = as.factor(dataS$con)
+
+
+ind_one_cause <- dataS %>%
+  filter(session == "1" & block %in% c(1,3,5,7)) %>%
+  group_by(post_2cause,con) %>%
+  nest() %>% 
+  mutate(
+    linMod = map(data, ~ lmer(update ~ 1 + (1 | subject), data = .)),
+    results = map(linMod, ~ tidy(.))
+  ) %>% 
+  unnest(results) %>% 
+  filter(term == "(Intercept)") %>% 
+  select(con,post_2cause, estimate = estimate, se = std.error)
+
+summary(lmer(data=dataS[dataS$session == 1 & dataS$block %in% c(1,3,5,7),], update ~ post_2cause*con + (post_2cause|subject)))
+
+summary(lm(data=dataS[dataS$session == 1 & dataS$block %in% c(1,3,5,7),], update ~ post_2cause*con ))
+summary(lmer(data=dataS[dataS$session == 1 & dataS$block %in% c(5,7),], update ~ block*con + (block|subject)))
+
+svg("figure/plot_reval_ind.svg", 
+    width = 5, 
+    height = 5/1.4,
+    antialias = "none")  # Prevents font smoothing changes
+
+(ind_one_cause %>%
+    ggplot(aes(x = con, y = estimate, fill = post_2cause, color = post_2cause)) +
+    geom_bar(stat="identity", position=position_dodge(.75), alpha = 0.7, size = 1, width = 0.6) +
+    geom_errorbar(aes(ymin=estimate-se, ymax=estimate+se), width=.15, size = 0.8, position=position_dodge(.75)) +
+    labs(title = "", x = expression(paste("Initial ", italic("p"), "(one cause)")),y="Rating update")  +
+    theme_classic() + 
+    theme(text=element_text(size=23),
+      panel.grid.major=element_blank(),
+      panel.grid.minor=element_blank(),
+      axis.line=element_line(colour="black"),
+      aspect.ratio=0.8/1,
+      axis.text.x=element_text(size=23, color="black"),
+      axis.text.y=element_text(size=20, color="black"),
+      plot.title = element_text(margin = margin(t=10,b=20),size=23),
+      legend.title=element_blank()) +
+      guides(color="none")+
+    scale_y_continuous(breaks = seq(0, 100, 50),limits = c(0, 100),expand = c(0,0)) +
+    scale_fill_manual(values = c("1" = "#FCD200", "2" = "#00C9B8"), labels = c("Before","After"))+
+    scale_color_manual(values = c("1" = "#FCD200", "2" = "#00C9B8")) +
+    scale_x_discrete(labels = c('high','low')))
+dev.off()
+```

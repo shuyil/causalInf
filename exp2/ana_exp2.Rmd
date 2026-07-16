@@ -1,0 +1,1021 @@
+---
+title: "ana_exp2"
+author: "Shuyi Luo"
+date: "01/04/2026"
+output: html_document
+---
+
+```{R load libraries}
+library(rjson)
+library(reshape2)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(ggplot2)
+library(dplyr)
+library(Rmisc)
+library(rstatix)
+library(broom.mixed)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(patchwork)
+library(ggpubr)
+library(emmeans)
+library(rlang)
+library(readr)
+library(ggeffects)
+```
+
+```{r load data}
+
+df <- read_csv("study2_data_all.csv")
+
+# session (TUS session): S = sham, D = IFS, H = HC
+# time (rating time: 1 = pre, 2 = post
+# l: rating of the experienced object
+# un: rating of the inferred object
+# baserate: 1 = low, 2 = high
+# mag: outcome magnitude
+# struct: trial condition, 1 = BB, 2 = UO, 0 = control
+
+```
+# 1. correlation between EXP and INF across sessions
+
+```{R correlation between exp and inf}
+compute_correlations_on_updates <- function(dfS,
+                                            xvar = "un",
+                                            yvar = "l",
+                                            time1 = 1,
+                                            time2 = 2,
+                                            struct_val = 1,
+                                            sessions = c("S","H","D"),
+                                            outlier_thresh = 3,
+                                            min_n = 3) {
+
+  if (!is.data.frame(dfS)) stop("dfS must be a data.frame")
+
+  df2 <- dfS %>%
+    filter(
+      as.character(time) %in% as.character(c(time1, time2)),
+      as.character(struct) == as.character(struct_val),
+      
+      as.character(session) %in% as.character(sessions)
+    ) %>%
+    mutate(
+      subject  = as.character(subject),
+      session  = as.character(session),
+      baserate = as.character(baserate),
+      time     = as.character(time),
+      struct   = as.character(struct)
+    )
+
+  if (nrow(df2) == 0) stop("No data after filtering.")
+
+  id_cols <- c("subject", "session", "baserate", "trial")
+
+  x_t1 <- paste0(xvar, "_t", time1)
+  x_t2 <- paste0(xvar, "_t", time2)
+  y_t1 <- paste0(yvar, "_t", time1)
+  y_t2 <- paste0(yvar, "_t", time2)
+
+  wide_all <- df2 %>%
+    select(all_of(id_cols), time, all_of(c(xvar, yvar)), struct) %>%
+    pivot_wider(
+      names_from = time,
+      values_from = c(!!sym(xvar), !!sym(yvar)),
+      names_glue = "{.value}_t{time}"
+    ) %>%
+    mutate(
+      delta_x = !!sym(x_t2) - !!sym(x_t1),
+      delta_y = !!sym(y_t2) - !!sym(y_t1)
+    ) %>%
+    filter(!(is.na(delta_x) & is.na(delta_y)))
+
+  # z-scores for filtering (within subject×session)
+  wide_z <- wide_all %>%
+    group_by(subject, session) %>%
+    mutate(
+      zx = (delta_x - mean(delta_x, na.rm = TRUE)) / sd(delta_x, na.rm = TRUE),
+      zy = (delta_y - mean(delta_y, na.rm = TRUE)) / sd(delta_y, na.rm = TRUE),
+      zx2 = (un_t2 - mean(un_t2, na.rm = TRUE)) / sd(un_t2, na.rm = TRUE),
+      zy2 = (l_t2  - mean(l_t2,  na.rm = TRUE)) / sd(l_t2,  na.rm = TRUE),
+      zx1 = (un_t1 - mean(un_t1, na.rm = TRUE)) / sd(un_t1, na.rm = TRUE),
+      zy1 = (l_t1  - mean(l_t1,  na.rm = TRUE)) / sd(l_t1,  na.rm = TRUE)
+    ) %>%
+    ungroup()
+
+  wide_strict <- wide_z %>%
+    filter(
+      
+      (is.na(zx2) | abs(zx2) <= outlier_thresh) &
+      (is.na(zy2) | abs(zy2) <= outlier_thresh) &
+      (is.na(zx1) | abs(zx1) <= outlier_thresh) &
+      (is.na(zy1) | abs(zy1) <= outlier_thresh)  
+    )
+
+  wide_loose <- wide_z
+
+  safe_cor <- function(d) {
+    x <- as.numeric(d$delta_x)
+    y <- as.numeric(d$delta_y)
+    good <- is.finite(x) & is.finite(y)
+    xg <- x[good]; yg <- y[good]
+    n <- length(xg)
+
+    r_val <- NA_real_
+    p_val <- NA_real_
+
+    if (n >= min_n && sd(xg) > 0 && sd(yg) > 0) {
+      ct <- tryCatch(cor.test(xg, yg, method = "spearman", exact = FALSE),
+                     error = function(e) NULL)
+      if (!is.null(ct)) {
+        r_val <- unname(ct$estimate)
+        p_val <- ct$p.value
+      }
+    }
+    list(r = r_val, p = p_val, n = n)
+  }
+
+  subjects <- sort(unique(wide_all$subject))
+  out <- vector("list", length(subjects))
+  names(out) <- subjects
+
+  for (s in subjects) {
+
+    # --- compute strict for all sessions for this subject
+    combos_sess <- wide_all %>% filter(subject == s) %>% distinct(session)
+
+    strict_rows <- vector("list", nrow(combos_sess))
+    strict_bad <- FALSE
+
+    for (i in seq_len(nrow(combos_sess))) {
+      sess <- combos_sess$session[i]
+      d1 <- wide_strict %>% filter(subject == s, session == sess)
+      res1 <- safe_cor(d1)
+
+      if (is.na(res1$r) || res1$n < min_n) strict_bad <- TRUE
+
+      strict_rows[[i]] <- data.frame(
+        subject = s,
+        session = sess,
+        n = res1$n,
+        r = res1$r,
+        p = res1$p,
+        stringsAsFactors = FALSE
+      )
+    }
+
+    strict_df <- bind_rows(strict_rows)
+
+    # --- if anything failed, recompute ALL sessions for that subject using loose
+    if (strict_bad) {
+      loose_rows <- vector("list", nrow(combos_sess))
+
+      for (i in seq_len(nrow(combos_sess))) {
+        sess <- combos_sess$session[i]
+        d2 <- wide_loose %>% filter(subject == s, session == sess)
+        res2 <- safe_cor(d2)
+
+        loose_rows[[i]] <- data.frame(
+          subject = s,
+          session = sess,
+          n = res2$n,
+          r = res2$r,
+          p = res2$p,
+          stringsAsFactors = FALSE
+        )
+      }
+
+      out[[s]] <- bind_rows(loose_rows) %>%
+        mutate(filter_used = "loose_t2only_subjectwide")
+    } else {
+      out[[s]] <- strict_df %>%
+        mutate(filter_used = "strict_t1t2_subjectwide")
+    }
+  }
+
+  bind_rows(out)
+}
+
+
+# ============================================================
+# Plot correlations
+# ============================================================
+
+cor_df <- compute_correlations_on_updates(
+  df,
+  xvar = "un",
+  yvar = "l",
+  time1 = 1,
+  time2 = 2,
+  struct_val = 1,
+  sessions = c("S","D","H")
+)
+
+subject_list <- c(1:20)
+
+session_pair <- c("S","H","D")
+
+session_colors <- c(
+  "S" = "gray",   # green
+  "H" = "royalblue",   # orange
+  "D" = "#E69F00"   # purple
+)
+
+cor_plot <- cor_df %>%
+  filter(subject %in% subject_list,
+         session %in% session_pair) %>%
+  mutate(
+    subject = as.character(subject),
+    session = factor(session, levels = session_pair)
+  )
+
+# summary for bars
+cor_plot_summary <- summarySEwithin(
+  data = cor_plot,
+  measurevar = "r",
+  withinvars = "session",
+  idvar = "subject",
+  na.rm = TRUE
+)
+
+# subject pairs
+pairs_df <- cor_plot %>%
+  group_by(subject) %>%
+  filter(n_distinct(session) == length(session_pair)) %>%
+  arrange(subject, session) %>%
+  ungroup()
+
+
+stat.test <- cor_plot %>%
+  t_test(r ~ session, paired = TRUE) %>%
+  adjust_pvalue(method = "none") %>%
+  dplyr::mutate(
+    p.signif = dplyr::case_when(
+      p < 0.001 ~ "***",
+      p < 0.01  ~ "**",
+      p < 0.05  ~ "*",
+      TRUE      ~ "ns"
+    ),
+    p.adj.signif = dplyr::case_when(
+      p.adj < 0.001 ~ "***",
+      p.adj < 0.01  ~ "**",
+      p.adj < 0.05  ~ "*",
+      TRUE          ~ "ns"
+    )
+  ) %>%
+  add_xy_position(x = "session")
+
+stat.test$y.position <- c(0.6, 0.86, 0.73)
+
+p <- ggplot() +
+  geom_col(
+    data = cor_plot_summary,
+    aes(x = session, y = r, fill = session),
+    width = 0.6, alpha = 0.7
+  ) +
+  geom_errorbar(
+    data = cor_plot_summary,
+    aes(x = session, ymin = r - se, ymax = r + se),
+    width = 0.15, size = 0.8
+  ) +
+  geom_line(
+    data = pairs_df, position = position_nudge(x = 0.08),
+    aes(x = session, y = r, group = subject),
+    color = "gray70", alpha = 0.6, size = 0.5
+  ) +
+  geom_point(
+    data = cor_plot,
+    aes(x = session, y = r, color = session),
+    position = position_nudge(x = 0.08),
+    shape = 21,
+    fill = "white",
+    size = 2.5,
+    stroke = 0.8
+  )+
+  stat_pvalue_manual(
+    stat.test,
+    label = "p.signif",
+    tip.length = 0.01, size = 8
+  ) +
+  scale_fill_manual(values = session_colors) +
+  scale_color_manual(values = session_colors) + scale_x_discrete(labels = c(D = "IFS", H = "HC", S = "Sham")) +
+  labs(
+    x = "",
+    y = "EXP-INF correlation"
+  ) + 
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none") + theme(aspect.ratio = 0.9/1, text = element_text(size = 20), axis.text.x = element_text(size = 20),
+                                          axis.text = element_text(color = "black", size = 20)) +   
+  scale_y_continuous(breaks = seq(-1,1,0.5), limits = c(-1,1.007), expand = c(0, 0))
+
+svg("figure/corr.svg",
+   width =3.5,
+   height = 3.5/0.9,
+   antialias = "none")
+print(p)
+dev.off()
+
+t.test(cor_df[cor_df$session == 'D' & cor_df$subject %in% subject_list,]$r, mu = 0, alternative = "two.sided")
+t.test(cor_df[cor_df$session == 'H' & cor_df$subject %in% subject_list,]$r, mu = 0, alternative = "two.sided")
+t.test(cor_df[cor_df$session == 'S' & cor_df$subject %in% subject_list,]$r, mu = 0, alternative = "two.sided")
+
+```
+
+
+# 2. rating update
+
+```{r functions to run}
+
+compute_deltas <- function(dfS,
+                           xvar = "un",
+                           yvar = "l",
+                           time1 = 1,
+                           time2 = 2,
+                           struct_val = 1,
+                           sessions = c("S","H","D")) {
+  df2 <- dfS %>%
+    filter(as.character(struct) == as.character(struct_val),
+           as.character(session) %in% as.character(sessions)) %>%
+    mutate(subject = as.character(subject),
+           session = as.character(session),
+           baserate = as.character(baserate),
+           time = as.character(time),
+           mag = mag)
+  
+  id_cols <- c("subject","session","baserate","trial","mag")
+  wide <- df2 %>%
+    dplyr::select(all_of(id_cols), time, all_of(c(xvar, yvar))) %>%
+    pivot_wider(names_from = time,
+                values_from = c(!!rlang::sym(xvar), !!rlang::sym(yvar)),
+                names_glue = "{.value}_t{time}")
+  
+  xt1 <- paste0(xvar, "_t", time1)
+  xt2 <- paste0(xvar, "_t", time2)
+  yt1 <- paste0(yvar, "_t", time1)
+  yt2 <- paste0(yvar, "_t", time2)
+  
+  wide <- wide %>%
+    mutate(
+      delta_x = !!rlang::sym(xt2) - !!rlang::sym(xt1),
+      delta_y = !!rlang::sym(yt2) - !!rlang::sym(yt1)
+    ) %>%
+    filter(!(is.na(delta_x) & is.na(delta_y)))
+  outlier_thresh = 3
+  wide_clean <- wide %>%
+    group_by(subject, session, baserate) %>%
+    mutate(
+      zx = (delta_x - mean(delta_x, na.rm = TRUE)) / sd(delta_x, na.rm = TRUE),
+      zy = (delta_y - mean(delta_y, na.rm = TRUE)) / sd(delta_y, na.rm = TRUE),
+      zx2 =  (un_t2 - mean(un_t2, na.rm = TRUE)) / sd(un_t2, na.rm = TRUE),
+      zy2 =  (l_t2 - mean(l_t2, na.rm = TRUE)) / sd(l_t2, na.rm = TRUE),
+      zx1 =  (un_t1 - mean(un_t1, na.rm = TRUE)) / sd(un_t1, na.rm = TRUE),
+      zy1 =  (l_t1 - mean(l_t1, na.rm = TRUE)) / sd(l_t1, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    filter(
+      (is.na(zx) | abs(zx) <= outlier_thresh) & (is.na(zx2) | abs(zx2) <= outlier_thresh) &
+      (is.na(zx1) | abs(zx1) <= outlier_thresh) & (is.na(zy) | abs(zy) <= outlier_thresh) &
+      (is.na(zy1) | abs(zy1) <= outlier_thresh) & (is.na(zy2) | abs(zy2) <= outlier_thresh)
+    )
+  
+  return(wide_clean)
+}
+
+
+plot_delta <- function(dfS, struct_val, y_variable, session_pair, subject_list = NULL,y_limits = NULL, y_breaks = NULL,legend_pos = "right_bottom", baserate_ft = NULL, plot_sig = NULL) {
+  
+  library(lmerTest)
+  
+  deltas <- compute_deltas(
+    dfS,
+    xvar = "un",
+    yvar = "l",
+    time1 = 1,
+    time2 = 2,
+    struct_val = struct_val,
+    sessions = c("S","H","D")
+  )
+  
+  if (!"block" %in% names(deltas)) {
+    deltas <- deltas %>%
+      mutate(block = if_else(subject == 1,
+                             ceiling(trial / 24),
+                             ceiling(trial / 22)))
+  }
+  
+  
+ deltas$y_var <- deltas[[y_variable]]
+ deltas <- deltas %>%
+    mutate(
+      session = factor(session),
+      subject = factor(subject),
+      mag = factor(mag)
+    ) %>% filter(subject %in% subject_list)
+ 
+ if (!is.null(baserate_ft)) {
+   deltas <- deltas %>% filter(baserate == baserate_ft)
+   
+ }
+ 
+  (agg.sub <- deltas %>%
+    aggregate(data=.,y_var ~ mag + subject + session, mean))
+  (table_mix <- summarySEwithin(data = agg.sub, measurevar = 'y_var', withinvars = c("session","mag"), idvar = 'subject') %>%
+       dplyr::filter(session %in% session_pair))
+  
+  
+  mod_data <- deltas %>% dplyr::filter(session %in% session_pair)
+
+  model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+  m1 <- lmer(model_formula, data = mod_data, REML = TRUE)
+  
+  anova_table <- anova(m1)
+  p_val <- anova_table["session", "Pr(>F)"]
+  
+  get_star <- function(p) {
+  if (is.na(p)) return("")
+  if (p < .001) return("***")
+  if (p < .01)  return("**")
+  if (p < .05)  return("*")
+  if (p < .1)  return("+")
+  return("ns")
+}
+  sig_star <- get_star(p_val)
+
+  y_label <- if (y_variable == "delta_y") {
+    "EXP"
+  } else if (y_variable == "delta_x") {
+    "INF"
+  } else {
+    y_variable
+  }
+  
+
+  legend_position <- switch(
+  legend_pos,
+  "right_top" = c(0.8, 1),
+  "right_bottom" = c(0.8, 0.25),
+  "right_middle" = c(0.8, 0.5),
+  "none" = "none",
+  c(0.85, 0.15)   # default = right bottom
+)
+y_title_margin <- if (y_variable == "delta_y") {
+  margin(r = -2)
+} 
+  star_size <- if (sig_star %in% c("*", "**", "***")) 12 else 10
+  p<-ggplot(agg.sub, aes(x = mag, y = y_var, color = session)) +
+    geom_line(data = table_mix, aes(group = session), size = 1.2) +
+    geom_errorbar(data = table_mix,
+                  aes(ymin = y_var - se, ymax = y_var + se),
+                  width = .2, size = 0.5) +
+    scale_color_manual(values = session_colors,
+  labels = c(D = "IFS", H = "HC", S = "Sham"))  +
+    theme_classic() +
+    labs(title = "",
+      x = "Magnitude",
+      y = y_label
+    ) + 
+    theme(
+      panel.grid = element_blank(),
+      axis.line = element_line(linewidth = 0.8),
+      aspect.ratio = 0.8/1,
+      text = element_text(size = 25, family = "Arial"),
+      axis.title = element_text(size = 25),
+      axis.text = element_text(size = 20, color = "black"),
+      legend.title = element_blank(),
+      legend.position = legend_position,
+      legend.text = element_text(size = 25),
+      legend.background = element_blank(),
+      axis.ticks = element_line(linewidth = 0.8, color = "black"),
+       axis.ticks.length = unit(4, "pt")
+    ) + scale_y_continuous(
+    limits = y_limits,
+    breaks = y_breaks, expand = c(0, 0)
+    )  
+  # if (y_variable == "delta_x") {
+  #   p<-p + theme(axis.title.y = element_text(margin = margin(r = -6)))
+  # }
+  if (is.null(plot_sig)) {
+    p<- p+annotate("text", x = (length(levels(mod_data$mag)) + 1) / 2,
+             y = Inf,
+             label = sig_star,
+             hjust = 1.1,
+             vjust = 1.5,
+             size = star_size) 
+  }
+  return(p)
+}
+
+
+plot_pair_interaction <- function(dat, pair, y_limits = c(-60, -29.9), y_breaks = seq(-60,-30,10), y_lab = -32, baserate_ft = NULL) {
+   if (!is.null(baserate_ft)) {
+   dat <- dat %>% filter(baserate == baserate_ft)
+   
+    }
+  dat_pair <- dat %>%
+    filter(session %in% pair) %>%
+    mutate(
+      session = factor(session, levels = pair),
+      mag = if (is.factor(mag) || is.character(mag)) {
+        as.numeric(as.character(mag))
+      } else {
+        as.numeric(mag)
+      }
+    )
+  model_formula <- delta_x ~ session * mag + (session+mag| subject)
+
+  fit <- lmer(model_formula, data = dat_pair, REML = TRUE)
+
+  # predicted values for each session
+  df <- ggpredict(fit, terms = c("mag", "session"), ci.lvl = 0.68)
+
+  # test whether the mag slope differs between sessions
+  tr <- emtrends(fit, specs = ~ session, var = "mag")
+  pw <- as.data.frame(pairs(tr, adjust = "none"))
+  pval <- pw$p.value[1]
+
+  sig_lab <- if (pval < 0.001) {
+    "***"
+  } else if (pval < 0.01) {
+    "**"
+  } else if (pval < 0.05) {
+    "*"
+  } else if (pval < 0.1) {
+    "+" 
+  } else {
+    "ns"
+  }
+
+  # label position
+  x_lab <- mean(range(df$x, na.rm = TRUE))
+  
+  star_size <- if (sig_lab %in% c("*", "**", "***")) 12 else 10
+  ggplot(df, aes(x = x, y = predicted)) +
+    geom_line(
+      aes(color = group),
+      linewidth = 1.2
+    ) +
+    annotate(
+      "text",
+      x = x_lab,
+      y = y_lab,
+      label = sig_lab,
+      size = star_size
+    ) +
+    scale_color_manual(values = session_colors[pair], name = "", labels = c(D = "IFS", H = "HC", S = "Sham")) +
+    scale_fill_manual(values = session_colors[pair])  +
+    labs(
+      x = "Magnitude",
+      y = "INF",
+      title = ""
+    ) +
+    theme_bw() +
+    theme(
+      text = element_text(family = "Arial", size = 26),
+      axis.title.x = element_text(size = 26),
+      axis.title.y = element_text(size = 26),
+      panel.grid = element_blank(),
+      legend.position = c(0.8, 0.9),
+      legend.background = element_blank(),
+      legend.text = element_text(size = 26),
+      rect = element_rect(size = 2,  color = "black"),  
+      axis.ticks = element_line(size = 1),
+      axis.text = element_text(color = "black"),
+      axis.ticks.length = unit(4, "pt"),     
+      aspect.ratio = 1 / 1
+    ) +  scale_y_continuous(breaks = y_breaks,limits = y_limits) + guides(color = "none", fill = "none")
+}
+
+
+```
+
+
+```{R load data}
+# Analyses focused on BB trials (struct == 1) 
+deltas <- compute_deltas(df, xvar = "un", yvar = "l", time1 = 1, time2 = 2, struct_val = 1,
+                         sessions = c("S","H","D"))   # include whichever sessions you want
+# --- PREP: ensure block exists and prepare data ---
+if (!"block" %in% names(deltas)) {
+  deltas <- deltas %>%
+    mutate(block = if_else(subject == 1,
+                           ceiling(trial / 24),
+                           ceiling(trial / 22)))
+}
+deltas <- deltas %>%
+  mutate(
+    session = factor(session), # S is reference
+    subject = factor(subject),
+    mag_re = mag,
+    mag = factor(mag)
+  ) 
+
+```
+
+```{R EXP under low baserates condition - HC vs IFS}
+# H and D
+# baserate == 1
+session_pair = c('H','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+svg("figure/exp_hd_1.svg",
+    width =4,
+    height = 4/0.8,
+    antialias = "none")
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(20, 50.14),
+  y_breaks = seq(20,50,10), legend_pos = "right_bottom", baserate_ft = '1'))
+dev.off()
+
+```
+
+```{r EXP - supplementary: Sham vs IFS and Sham vs HC}
+
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/exp_sd_1.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  # Prevents font smoothing changes
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(20, 50.14),
+  y_breaks = seq(20,50,10), legend_pos = "right_bottom", baserate_ft = '1'))
+dev.off()
+
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+svg("figure/exp_sh_1.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  # Prevents font smoothing changes
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(20, 50.14),
+  y_breaks = seq(20,50,10), legend_pos = "right_bottom", baserate_ft = '1'))
+dev.off()
+
+
+```
+
+```{r INF difference across sessions}
+
+## across baserate conditions
+# S and H
+
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag) 
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_sh.svg",
+    width =4,
+    height = 4/0.8,
+    antialias = "none")
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -24.9),
+  y_breaks = seq(-50,-25,25), legend_pos = "right_top", baserate_ft = NULL, plot_sig = 1))
+dev.off()
+
+# S and D
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_sd.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -24.9),
+  y_breaks = seq(-50,-25,25), legend_pos = "right_top", baserate_ft = NULL, plot_sig = 1))
+dev.off()
+
+# H and D
+session_pair = c('H','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_hd.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -24.9),
+  y_breaks = seq(-50,-25,25), legend_pos = "right_top", baserate_ft = NULL, plot_sig = 1))
+dev.off()
+
+
+
+## baserate == '1' (low baserate condition)
+# S and H
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_sh1.svg",
+    width =4,
+    height = 4/0.8,
+    antialias = "none")
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-60, -29.85),
+  y_breaks = seq(-60,-30,10), legend_pos = "right_top", baserate_ft = '1', plot_sig = 1))
+dev.off()
+
+# S and D
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_sd1.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-60, -29.85),
+  y_breaks = seq(-60,-30,10), legend_pos = "right_top", baserate_ft = '1', plot_sig = 1))
+dev.off()
+
+# H and D
+session_pair = c('H','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+mod_data$y_var <- mod_data$delta_x
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+svg("figure/inf_hd1.svg", 
+    width =4, 
+    height = 4/0.8,
+    antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-60, -29.85),
+  y_breaks = seq(-60,-30,10), legend_pos = "right_top", baserate_ft = '1', plot_sig = 1))
+dev.off()
+
+```
+
+```{R magnitude x tus session interaction: IFS vs HC}
+# test magnitude x tus session interaction
+
+model_formula <- y_var~session*as.numeric(mag)+(session+as.numeric(mag) |subject)
+session_pair = c('D','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+
+# across baserate
+summary(lmer(model_formula,data = mod_data, REML = TRUE))
+# baserate == '1'
+summary(lmer(model_formula,data = mod_data[mod_data$baserate=='1',], REML = TRUE))
+
+## visualise interaction effect
+# across baserates
+svg("figure/inter_hd.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+plot_pair_interaction(deltas, c("H", "D"), y_limits = c(-50, -30), y_breaks = seq(-50, -30, 10), y_lab = -35)
+dev.off()
+
+# baserate == '1'
+svg("figure/inter_hd1.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+
+plot_pair_interaction(deltas, c("H", "D"), y_limits = c(-60, -30), y_breaks = seq(-60,-30,10), y_lab = -40, baserate_ft = '1')
+dev.off()
+```
+
+```{R supplementray: magnitude x TUS session interaction - Sham vs IFS and Sham vs HC}
+
+model_formula <- y_var~session*as.numeric(mag)+(session+as.numeric(mag) |subject)
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+
+# across baserate
+summary(lmer(model_formula,data = mod_data, REML = TRUE))
+svg("figure/inter_sd.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+plot_pair_interaction(deltas, c("D", "S"), y_limits = c(-50, -30), y_breaks = seq(-50, -30, 10), y_lab = -35)
+dev.off()
+
+# baserate == '1'
+summary(lmer(model_formula,data = mod_data[mod_data$baserate=='1',], REML = TRUE))
+svg("figure/inter_sd1.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+plot_pair_interaction(deltas, c("D", "S"), y_limits = c(-60, -30), y_breaks = seq(-60,-30,10), y_lab = -40,baserate_ft = '1')
+dev.off()
+
+model_formula <- y_var~session*as.numeric(mag)+(session+as.numeric(mag) |subject)
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_x
+
+# across baserate
+summary(lmer(model_formula,data = mod_data, REML = TRUE))
+svg("figure/inter_sh.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+plot_pair_interaction(deltas, c("H", "S"), y_limits = c(-50, -30), y_breaks = seq(-50, -30, 10), y_lab = -35)
+dev.off()
+
+# baserate == '1'
+summary(lmer(model_formula,data = mod_data[mod_data$baserate=='1',], REML = TRUE))
+svg("figure/inter_sh1.svg", 
+    width = 3.8, 
+    height = 3.8/1,
+    antialias = "none")
+plot_pair_interaction(deltas, c("H", "S"), y_limits = c(-60, -30), y_breaks = seq(-60,-30,10), y_lab = -40,baserate_ft = '1')
+dev.off()
+```
+
+
+# supplementary figures
+
+```{r BB: EXP across baserates}
+deltas <- compute_deltas(df, xvar = "un", yvar = "l", time1 = 1, time2 = 2, struct_val = 1,
+                         sessions = c("S","H","D"))   # include whichever sessions you want
+
+if (!"block" %in% names(deltas)) {
+  deltas <- deltas %>%
+    mutate(block = if_else(subject == 1,
+                           ceiling(trial / 24),
+                           ceiling(trial / 22)))
+}
+deltas <- deltas %>%
+  mutate(
+    session = factor(session), # S is reference
+    subject = factor(subject),
+    mag_re = mag,
+    mag = factor(mag)
+  ) 
+
+# S and H
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag) 
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+# svg("figure/exp_sh.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none") 
+p1 <- plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 45),
+  y_breaks = seq(15,45,15), legend_pos = "right_bottom", baserate_ft = NULL)
+print(p1)
+# dev.off()
+
+# S and D
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+# svg("figure/exp_sd.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none") 
+p2 <- plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 45),
+  y_breaks = seq(15,45,15), legend_pos = "right_bottom", baserate_ft = NULL)
+print(p2)
+# dev.off()
+
+
+# H and D
+session_pair = c('H','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair) 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+# svg("figure/exp_hd.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none") 
+p3 <- plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 45),
+  y_breaks = seq(15,45,15), legend_pos = "right_bottom", baserate_ft = NULL)
+print(p3)
+# dev.off()
+
+```
+
+```{r BB: EXP under high baserate condition}
+# baserate == 3
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '3') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+# svg("figure/exp_hd_3.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none")  # Prevents font smoothing changes
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 40.14),
+  y_breaks = seq(15,40,5), legend_pos = "right_bottom", baserate_ft = '3'))
+#dev.off()
+
+
+
+
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+# svg("figure/exp_sd_3.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none") 
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 40.14),
+  y_breaks = seq(15,40,5), legend_pos = "right_bottom", baserate_ft = '3'))
+# dev.off()
+
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_y
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+
+# svg("figure/exp_sh_3.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none") 
+print(plot_delta(df, 1, "delta_y", session_pair, subject_list, y_limits = c(15, 40.14),
+  y_breaks = seq(15,40,5), legend_pos = "right_bottom", baserate_ft = '3'))
+# dev.off()
+
+```
+
+```{R BB: INF under high baserate condition}
+
+
+## baserate == '1' (low baserate condition)
+# S and H
+session_pair = c('S','H')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+# svg("figure/inf_sh3.svg",
+#     width =4,
+#     height = 4/0.8,
+#     antialias = "none")
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -19.85),
+  y_breaks = seq(-50,-20,10), legend_pos = "right_top", baserate_ft = '3', plot_sig = 1))
+# dev.off()
+
+# S and D
+session_pair = c('S','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+# svg("figure/inf_sd3.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -19.85),
+  y_breaks = seq(-50,-20,10), legend_pos = "right_top", baserate_ft = '3', plot_sig = 1))
+# dev.off()
+
+# H and D
+session_pair = c('H','D')
+mod_data <- deltas %>%
+  dplyr::filter(session %in% session_pair & baserate == '1') 
+mod_data$y_var <- mod_data$delta_x
+mod_data$y_var <- mod_data$delta_x
+model_formula <- y_var ~ session + (1|subject) + (1|subject:mag)
+summary(lmer(model_formula, data = mod_data, REML = TRUE))
+# svg("figure/inf_hd3.svg", 
+#     width =4, 
+#     height = 4/0.8,
+#     antialias = "none")  
+print(plot_delta(df, 1, "delta_x", session_pair, subject_list, y_limits = c(-50, -19.85),
+  y_breaks = seq(-50,-20,10), legend_pos = "right_top", baserate_ft = '3', plot_sig = 1))
+# dev.off()
+
+```

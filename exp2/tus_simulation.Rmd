@@ -1,0 +1,285 @@
+---
+title: "tus_simulation"
+author: "Shuyi Luo"
+date: "19/03/2026"
+output: html_document
+---
+
+
+```{r read in data}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+df <- read_excel("simulation_used.xlsx", sheet = 1)
+# In the simulation data file, IFS is coded as "L" and HC is coded as "V"
+
+df <- df %>%
+  dplyr::rename(SubjectID = 1) %>%
+  fill(SubjectID, .direction = "down") %>%
+  fill(Condition, .direction = "down") %>%
+  mutate(session = Condition)
+
+df <- df %>%
+  mutate(roi_isppa = `ROI ISPPA \r\n(in W/cm^2)`) %>%
+  mutate(thermal = `Max thermal dose including cooling, in total 180s (< 0.25  CEM43)`)
+
+```
+
+```{r ISPPA}
+inten_mean <- aggregate(
+  roi_isppa ~ SubjectID + session,
+  data = df,
+  FUN = mean
+)
+inten_mean
+
+mean(inten_mean[inten_mean$session=="V",]$roi_isppa)
+sd(inten_mean[inten_mean$session=="V",]$roi_isppa)
+range(inten_mean[inten_mean$session=="V",]$roi_isppa)
+
+
+mean(inten_mean[inten_mean$session=="L",]$roi_isppa)
+sd(inten_mean[inten_mean$session=="L",]$roi_isppa)
+range(inten_mean[inten_mean$session=="L",]$roi_isppa)
+
+summary_df <- df %>%
+  group_by(session) %>%
+  dplyr::summarise(
+    mean = mean(roi_isppa, na.rm = TRUE),
+    se = sd(roi_isppa, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+
+session_colors <- c(
+  "V" = "royalblue",   # orange
+  "L" = "#E69F00"   # purple
+)
+ 
+
+plot_df <- inten_mean %>% filter(session == 'V')
+p <- ggplot() +
+  geom_boxplot(
+    data = plot_df,
+    aes(x = session, y = roi_isppa, fill = session),
+    width = 0.5,
+    alpha = 0.8,
+    outlier.shape = NA   # avoid double plotting (we add points)
+  ) +
+  geom_point(
+    data = plot_df,
+    aes(x = session, y = roi_isppa, color = session),
+    position = position_jitter(width = 0.05),
+    shape = 21, fill = "white",
+    size = 2.5, stroke = 0.8
+  ) +
+  geom_hline(
+    yintercept = 3,
+    linetype = "dashed",
+    color = "black",
+    size = 0.8
+  ) +
+  scale_fill_manual(values = session_colors) +
+  scale_color_manual(values = session_colors) +
+  labs(
+    x = "",
+    y = expression("ROI ISPPA (W/cm"^2*")")
+  ) +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none", aspect.ratio = 2.2,
+        text = element_text(size = 20), axis.text.x = element_text(size = 24,color = "black"),
+              axis.ticks = element_line(linewidth = 0.8, color = "black"),axis.text.y = element_text(color = "black"),
+       axis.ticks.length = unit(4, "pt"), axis.line = element_line(linewidth = 0.8, color = "black")) +
+  scale_y_continuous(
+    breaks = seq(0,15,5),
+    limits = c(0,15.05),
+    expand = c(0, 0)
+  ) + scale_x_discrete(labels = c(
+  "L" = "IFS",
+  "V" = "HC"))
+
+# svg("figure/simu_hc.svg", 
+#     width =7, 
+#     height = 7/2.2,
+#     antialias = "none") 
+
+print(p)
+#dev.off()
+
+
+plot_df <- inten_mean %>% filter(session == 'L')
+p <- ggplot() +
+  geom_boxplot(
+    data = plot_df,
+    aes(x = session, y = roi_isppa, fill = session),
+    width = 0.5,
+    alpha = 0.8,
+    outlier.shape = NA   # avoid double plotting (we add points)
+  ) +
+  geom_point(
+    data = plot_df,
+    aes(x = session, y = roi_isppa, color = session),
+    position = position_jitter(width = 0.05),
+    shape = 21, fill = "white",
+    size = 2.5, stroke = 0.8
+  ) +
+  geom_hline(
+    yintercept = 3,
+    linetype = "dashed",
+    color = "black",
+    size = 0.8
+  ) +
+  scale_fill_manual(values = session_colors) +
+  scale_color_manual(values = session_colors) +
+  labs(
+    x = "",
+    y = expression("ROI ISPPA (W/cm"^2*")")
+  ) +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none", aspect.ratio = 2.2,
+        text = element_text(size = 20), axis.text.x = element_text(size = 24,color = "black"),
+              axis.ticks = element_line(linewidth = 0.8, color = "black"),axis.text.y = element_text(color = "black"),
+       axis.ticks.length = unit(4, "pt"), axis.line = element_line(linewidth = 0.8, color = "black")) +
+  scale_y_continuous(
+    breaks = seq(0,15,5),
+    limits = c(0,15.05),
+    expand = c(0, 0)
+  ) + scale_x_discrete(labels = c(
+  "L" = "IFS",
+  "V" = "HC"))
+
+# svg("figure/simu_ifs.svg", 
+#     width =7, 
+#     height = 7/2.2,
+#     antialias = "none") 
+
+print(p)
+#dev.off()
+
+mean(plot_df$roi_isppa)
+```
+
+```{R Thermal dose}
+p_v <- ggplot(df[df$Condition == "V", ], aes(x = "HC", y = thermal)) +
+  geom_violin(fill = session_colors["V"], alpha = 0.5, color = NA) +
+  geom_jitter(width = 0.1, size = 2, alpha = 0.7) +
+  theme_classic() +
+  scale_y_continuous(
+    breaks = seq(0, 0.25, 0.05),
+    limits = c(0, 0.25)
+  ) +
+  labs(y = "Thermal dose (CEM43)", x = "", title = " ") +
+  theme(aspect.ratio = 2.5) +
+  theme(
+    axis.line         = element_line(linewidth = 0.6),
+    axis.ticks        = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt"),
+    text              = element_text(size = 20),
+    plot.title        = element_text(hjust = 0.5),
+    axis.text.x       = element_text(size = 25, color = "black")
+  ) +
+  geom_hline(yintercept = 0.25, linetype = "dashed", linewidth = 0.8)
+
+p_l <- ggplot(df[df$Condition == "L", ], aes(x = "IFS", y = thermal)) +
+  geom_violin(fill = session_colors["L"], alpha = 0.5, color = NA) +
+  geom_jitter(width = 0.1, size = 2, alpha = 0.7) +
+  theme_classic() +
+  scale_y_continuous(
+    breaks = seq(0, 0.25, 0.05),
+    limits = c(0, 0.25)
+  ) +
+  labs(y = "Thermal dose (CEM43)", x = "", title = " ") +
+  theme(aspect.ratio = 2.5) +
+  theme(
+    axis.line         = element_line(linewidth = 0.6),
+    axis.ticks        = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt"),
+    text              = element_text(size = 20),
+    plot.title        = element_text(hjust = 0.5),
+    axis.text.x       = element_text(size = 25, color = "black")
+  ) +
+  geom_hline(yintercept = 0.25, linetype = "dashed", linewidth = 0.8)
+
+p_v
+p_l
+```
+
+
+```{R Mechanical Index (MI)}
+
+df$MI <- df$`Mechanical Index (MI) <1.9`
+
+# MI
+p_v <- ggplot(df %>% filter(Condition == "V"),
+              aes(x = "", y = MI)) +
+  geom_violin(fill = session_colors["V"], alpha = 0.5, color = NA, trim = FALSE) +
+  geom_jitter(width = 0.05, size = 2, alpha = 0.7) +   geom_hline(yintercept = 1.9, linetype = "dashed", linewidth = 0.8) +
+  scale_y_continuous(
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "",
+    y = "Mechanical Index (MI)",
+    title = "HC"
+  ) +
+  theme_classic() +
+  theme(
+    axis.line = element_line(linewidth = 0.6),
+    axis.ticks = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt"),
+    text = element_text(size = 20, family = "Arial"),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 18, color = "black"),
+    plot.title = element_text(hjust = 0.5),
+    aspect.ratio = 2/1
+  ) +  scale_y_continuous(
+    breaks = seq(0, 2, 0.5),
+    limits = c(0, 2.008),
+    expand = c(0, 0)
+  ) 
+
+
+p_l <- ggplot(df %>% filter(Condition == "L"),
+              aes(x = "", y = MI)) +
+  geom_violin(fill = session_colors["L"], alpha = 0.5, color = NA, trim = FALSE) +
+  geom_jitter(width = 0.05, size = 2, alpha = 0.7) +   geom_hline(yintercept = 1.9, linetype = "dashed", linewidth = 0.8) +
+  scale_y_continuous(
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "",
+    y = "Mechanical Index (MI)",
+    title = "IFS"
+  ) +
+  theme_classic() +
+  theme(
+    axis.line = element_line(linewidth = 0.6),
+    axis.ticks = element_line(linewidth = 0.6),
+    axis.ticks.length = unit(4, "pt"),
+    text = element_text(size = 20, family = "Arial"),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 18, color = "black"),
+    plot.title = element_text(hjust = 0.5),
+    aspect.ratio = 2/1
+  ) +  scale_y_continuous(
+    breaks = seq(0, 2, 0.5),
+    limits = c(0, 2.008),
+    expand = c(0, 0)
+  ) 
+# svg("figure/MI_hc.svg",
+#     width =7,
+#     height = 7/2,
+#     antialias = "none")
+p_v
+# dev.off()
+
+# svg("figure/MI_ifs.svg",
+#     width =7,
+#     height = 7/2,
+#     antialias = "none")
+p_l
+# dev.off()
+
+```
