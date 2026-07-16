@@ -1,5 +1,3 @@
-Causal Inference — Analysis Code and Data
-
 This repository contains data and analysis scripts accompanying the manuscript. It is organised into two subfolders: exp1 (Experiment 1, fMRI) and exp2 (Experiment 2, TUS). MATLAB (.m) files are used for data preprocessing; behavioural analyses are performed in R and provided as R Markdown (.Rmd) files to be run in RStudio. All datasets are located in the same folder as their corresponding analysis scripts.
 
 
