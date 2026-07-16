@@ -5,8 +5,11 @@ System Requirements:
 
 
 R (≥ 4.1) and RStudio (≥ 2022.07): required for behavioural analysis
+
 MATLAB (≥ R2020a): required for data preprocessing
+
 Tested on macOS (Monterey and above) 
+
 No non-standard hardware required
 
 
